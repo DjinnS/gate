@@ -1,0 +1,42 @@
+verbose = true
+debug   = true
+authorized_keys = "./authorized_keys"
+CACert = "ca_key.pub"
+hostkey = "id_rsa"
+
+[proxy]
+port = 2200
+interface = "0.0.0.0"
+macs = [ "hmac-sha1" ]
+ciphers = [ "aes256-ctr" ]
+keyExchange = [ "ecdh-sha2-nistp384" ]
+serverName = "PROXY"
+banner = "./etc/proxy.banner"
+allowedPrincipal = "proxy"
+
+[forwarder]
+port = 2222
+macs = [ "hmac-sha1" ]
+ciphers = [ "aes256-ctr" ]
+keyExchange = [ "ecdh-sha2-nistp384" ]
+serverName = "FORWARDER"
+banner = "./etc/forwarder.banner"
+remoteUser = "admin" # use to overide user provider by client to connect to destination
+remoteUserPrincipal = false # use user from principal to connect to destination
+                           # Format: 'remote:user' in principals (replace user by disired value)
+
+[log]
+logDir = "./logs"
+
+# LogFormat - TODO
+# %N : destination name (IP or hostname, depend of what is provided to ssh)
+# %Y : Year number, format YYYY
+# %M : Month number, format MM
+# %D = Day number, format DD
+# %h = Hour number, format HH
+# %m = Minute number, format mm
+# %s = Second number, format ss
+# %u = Username (real username from certificate)
+#
+# logHierarchy : "logDir/%N/%Y/%M/%D"
+# logName      : %u.%h%m%s
