@@ -1,8 +1,8 @@
 verbose = true
 debug   = true
 authorized_keys = "./authorized_keys"
-CACert = "ca_key.pub"
-hostkey = "id_rsa"
+CACert = "./etc/ca_key.pub"
+hostkey = "./etc/id_rsa"
 
 [proxy]
 port = 2200
@@ -21,7 +21,7 @@ ciphers = [ "aes256-ctr" ]
 keyExchange = [ "ecdh-sha2-nistp384" ]
 serverName = "FORWARDER"
 banner = "./etc/forwarder.banner"
-remoteUser = "admin" # use to overide user provider by client to connect to destination
+remoteUser = "" # use to overide user provider by client to connect to destination
 remoteUserPrincipal = false # use user from principal to connect to destination
                            # Format: 'remote:user' in principals (replace user by disired value)
 

@@ -47,13 +47,13 @@ func loadHostKeys(key string) ssh.Signer {
 	privateBytes, err := ioutil.ReadFile(key)
 	if err != nil {
 		fail(fmt.Sprintf("Failed to load private key from %s !\n", key))
-		os.Exit(1)
+		return nil
 	}
 
 	private, err := ssh.ParsePrivateKey(privateBytes)
 	if err != nil {
 		fail(fmt.Sprintf("Failed to parse private key from %s !\n", key))
-		os.Exit(1)
+		return nil
 	}
 
 	return private

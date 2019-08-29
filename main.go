@@ -109,14 +109,14 @@ func main() {
 		CertChecker.IsUserAuthority = func(key ssh.PublicKey) bool {
 			publicKey, err := ioutil.ReadFile(myGateway.Config.CACert) // open private key
 			if err != nil {
-				fail(fmt.Sprintf("Failed to load private key from %s !\n", myGateway.Config.CACert))
-				os.Exit(1)
+				fail(fmt.Sprintf("Failed to load certificate public key from %s !\n", myGateway.Config.CACert))
+				return false
 			}
 
 			serverCA, _, _, _, err := ssh.ParseAuthorizedKey(publicKey) // load CA
 			if err != nil {
-				fail(fmt.Sprintf("Failed to parse private key from %s : %s!\n", myGateway.Config.CACert, err))
-				os.Exit(1)
+				fail(fmt.Sprintf("Failed to parse certificate public key from %s : %s!\n", myGateway.Config.CACert, err))
+				return false
 			}
 
 			keyCompare := bytes.Compare(serverCA.Marshal(), key.Marshal())
@@ -132,8 +132,8 @@ func main() {
 		// also check if login user found in principal list
 		permissions, err := CertChecker.Authenticate(conn, key)
 		if err != nil {
-			fail(fmt.Sprintf("%s Failed to Authenticate with cert: %s !\n", connID, err))
-			os.Exit(1)
+			log1(fmt.Sprintf("%s Failed to Authenticate with cert: %s !\n", connID, err))
+			return nil, errors.New("Failed to Authenticate with cert")
 		}
 
 		// CheckCert verify cert validity
@@ -141,8 +141,8 @@ func main() {
 		// also check certificate validity
 		err = CertChecker.CheckCert(myGateway.Config.Proxy.AllowedPrincipal, cert)
 		if err != nil {
-			fail(fmt.Sprintf("%s Unable to found principal \"%s\": %s !\n", connID, myGateway.Config.Proxy.AllowedPrincipal, err))
-			os.Exit(1)
+			log1(fmt.Sprintf("%s Unable to found principal \"%s\": %s !\n", connID, myGateway.Config.Proxy.AllowedPrincipal, err))
+			return nil, errors.New(fmt.Sprintf("Unable to found principal \"%s\"", myGateway.Config.Proxy.AllowedPrincipal))
 		}
 		debug(fmt.Sprintf("%s Principal \"%s\" found.", connID, myGateway.Config.Proxy.AllowedPrincipal))
 
@@ -190,7 +190,7 @@ func main() {
 	for {
 		newConn, err := listener.Accept()
 		if err != nil {
-			fail(fmt.Sprintf("Failed to accept incoming connection (%s)", err))
+			log1(fmt.Sprintf("Failed to accept incoming connection (%s)", err))
 			continue
 		}
 
@@ -204,7 +204,7 @@ func main() {
 		go func() {
 			sshConn, chans, reqs, err := ssh.NewServerConn(newConn, sshProxyConfig)
 			if err != nil {
-				fail(fmt.Sprintf("Failed to handshake: %s (rip: %v)", err, newConn.RemoteAddr()))
+				log1(fmt.Sprintf("Failed to handshake: %s (rip: %v)", err, newConn.RemoteAddr()))
 				return
 			}
 

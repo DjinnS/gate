@@ -106,10 +106,15 @@ func (f *forwarder) Forward() {
 	}
 	log1(fmt.Sprintf("%s Connection accepted from %s (%s) (from proxy)", f.ConnID, f.clientSshConn.RemoteAddr(), f.clientSshConn.ClientVersion()))
 
+	// Get remote user for the destination connection
 	f.RemoteUser = f.getRemoteUser()
+	if f.RemoteUser == "" { // if empty, no need to continue
+		return // will close the connection
+	}
 
 	// Print incoming out-of-band Requests
 	go f.handleRequests()
+
 	// Accept all channels
 	go f.handleChannels()
 }
@@ -149,7 +154,6 @@ func (f *forwarder) handleChannels() {
 
 		// Log
 		startTime := time.Now()
-		//f.clientChannel = NewLogChannel(startTime, f.clientRawChannel, f.clientSshConn.User(), f.Gate.Config.Log)
 		f.clientChannel = NewLogChannel(startTime, f.clientRawChannel, f.RemoteUser, f.remoteDest, f.Gate.Config.Log.LogDir)
 
 		go f.handleSessionRequests()
@@ -233,6 +237,7 @@ func (f *forwarder) remoteConnection() {
 	}
 
 	debug(fmt.Sprintf("%s Remote user: %s", f.ConnID, f.RemoteUser))
+
 	// Setup SSH crypto
 	if len(f.Gate.Config.Forwarder.Ciphers) > 0 {
 		clientConfig.Config.Ciphers = f.Gate.Config.Forwarder.Ciphers
@@ -265,7 +270,6 @@ func (f *forwarder) remoteConnection() {
 	debug(fmt.Sprintf("%s Dialled remote destination successfully ...", f.ConnID))
 
 	// Forward the session channel
-	//log.Printf("Setting up channel to remote %s", remoteAddr)
 	f.remoteChannel, f.remoteRequests, err = f.remoteSshConn.OpenChannel("session", []byte{})
 	if err != nil {
 		debug(fmt.Sprintf("%s Remote session setup failed: %v", f.ConnID, err))
@@ -288,12 +292,15 @@ func (f *forwarder) remoteConnection() {
 
 func (f *forwarder) proxy() {
 
-	debug(fmt.Sprintf("%s Entering proxy() ...", f.ConnID))
+	debug(fmt.Sprintf("%s Entering mode proxy ...", f.ConnID))
 
+	// close channels and connections
 	var closer sync.Once
 	closeFunc := func() {
 		f.clientChannel.Close()
 		f.remoteChannel.Close()
+		f.clientSshConn.Close()
+		f.remoteSshConn.Close()
 	}
 
 	defer closer.Do(closeFunc)
@@ -302,13 +309,13 @@ func (f *forwarder) proxy() {
 	// From remote, to client.
 	go func() {
 		io.Copy(f.clientChannel, f.remoteChannel)
-		closerChan <- true
+		closerChan <- true // handle end of connection
 	}()
 
 	// from client to remote
 	go func() {
 		io.Copy(f.remoteChannel, f.clientChannel)
-		closerChan <- true
+		closerChan <- true // handle end of connection
 	}()
 
 	for {
@@ -367,6 +374,6 @@ func (f *forwarder) getPrincipal(principal string, principals string) string {
 			return c[1]
 		}
 	}
-	fail(fmt.Sprintf("%s Unable to \"%s\" in principals %s", f.ConnID, principal, principals))
+	log1(fmt.Sprintf("%s Unable to \"%s\" in principals %s", f.ConnID, principal, principals))
 	return ""
 }
