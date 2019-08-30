@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 type forwarder struct {
@@ -19,9 +20,11 @@ type forwarder struct {
 	Principals string
 	RemoteUser string
 
-	localAddr string
-	// remote server where to forward connection
-	remoteDest string
+	agentForwarding     bool
+	chanAgentForwarding chan bool
+
+	localAddr  string
+	remoteDest string // remote server where to forward connection
 
 	// channel to send the listen port
 	chanListenPort chan int
@@ -30,7 +33,9 @@ type forwarder struct {
 	maskedReqs chan *ssh.Request
 
 	// client connection
-	clientSshConn *ssh.ServerConn
+	InitialClientSshCon *ssh.ServerConn
+	clientSshConn       *ssh.ServerConn
+
 	// client channel & requests
 	clientChannel     *LogChannel
 	clientRawChannel  ssh.Channel
@@ -106,10 +111,15 @@ func (f *forwarder) Forward() {
 	}
 	log1(fmt.Sprintf("%s Connection accepted from %s (%s) (from proxy)", f.ConnID, f.clientSshConn.RemoteAddr(), f.clientSshConn.ClientVersion()))
 
+	// Get remote user for the destination connection
 	f.RemoteUser = f.getRemoteUser()
+	if f.RemoteUser == "" { // if empty, no need to continue
+		return // will close the connection
+	}
 
 	// Print incoming out-of-band Requests
 	go f.handleRequests()
+
 	// Accept all channels
 	go f.handleChannels()
 }
@@ -149,9 +159,12 @@ func (f *forwarder) handleChannels() {
 
 		// Log
 		startTime := time.Now()
-		//f.clientChannel = NewLogChannel(startTime, f.clientRawChannel, f.clientSshConn.User(), f.Gate.Config.Log)
 		f.clientChannel = NewLogChannel(startTime, f.clientRawChannel, f.RemoteUser, f.remoteDest, f.Gate.Config.Log.LogDir)
 
+		// channel to synchronise Requests for AgentForwarding
+		f.chanAgentForwarding = make(chan bool, 1)
+
+		// handle all requests in a routine
 		go f.handleSessionRequests()
 
 		// Connect to the destination
@@ -176,32 +189,40 @@ func (f *forwarder) handleSessionRequests() {
 			return
 		}
 
-		// keep this for future usage
-		/*switch req.Type {
-				case "auth-agent-req@openssh.com":
-					if req.WantReply {
-						req.Reply(true, []byte{})
-					}
-		      f.MaskedReqs <- req
+		switch req.Type {
 
-				case "pty-req":
-					if req.WantReply {
-						req.Reply(true, []byte{})
-					}
-					req.WantReply = false
+		// forward SSH Agent
+		// We have to synchronise this goroutine with the function remoteConenction()
+		// which need AgentForwarding be at true
+		case "auth-agent-req@openssh.com":
+			if req.WantReply {
+				req.Reply(true, []byte{})
+			}
+			f.maskedReqs <- req
+			f.agentForwarding = true
+			f.chanAgentForwarding <- true
+			debug(fmt.Sprintf("%s Agent forwarding enabled", f.ConnID))
 
-					f.MaskedReqs <- req
+		case "pty-req":
+			if req.WantReply {
+				req.Reply(true, []byte{})
+			}
+			req.WantReply = false
 
-				case "shell":
-					if req.WantReply {
-						req.Reply(true, []byte{})
-					}
-					req.WantReply = false
-					f.MaskedReqs <- req
+			// disabled pty-req forwarding to avoid the closing of the connection
+			// on remote host because we already request a terminal at connection
+			//f.maskedReqs <- req
 
-				default:
-					f.MaskedReqs <- req
-				}*/
+		case "shell":
+			if req.WantReply {
+				req.Reply(true, []byte{})
+			}
+			req.WantReply = false
+			f.maskedReqs <- req
+
+		default:
+			f.maskedReqs <- req
+		}
 
 		// For the moment, copy request without change
 		if req.WantReply {
@@ -223,16 +244,21 @@ func (f *forwarder) remoteConnection() {
 	debug(fmt.Sprintf("%s Forwarder is preparing to connect to the destination", f.ConnID))
 	remoteAddr := f.remoteDest // TODO : add a timeout
 
-	// TODO : auth
+	// Currently we only support auth through SSH Agent forward
 	clientConfig := &ssh.ClientConfig{
 		User: f.RemoteUser,
-		Auth: []ssh.AuthMethod{
-			ssh.Password("root"),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // <- in production we need to fix this !!!
+
+		// TODO : add a method to handle hostkey validation
+		// at least record the hostkey the first time to avoid future MITM attack
+		// It could be cool to have a central service to store the keys to share it accross a "cluster"
+		// of proxy. May be consul with K/V ? Or a simple Redis ? (consul HA will be easier to deploy)
+		// Add an option to to host key signature validation (deploy signed host key on target)
+		// Add an option (API/CLI to update/purge entries)
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
 	debug(fmt.Sprintf("%s Remote user: %s", f.ConnID, f.RemoteUser))
+
 	// Setup SSH crypto
 	if len(f.Gate.Config.Forwarder.Ciphers) > 0 {
 		clientConfig.Config.Ciphers = f.Gate.Config.Forwarder.Ciphers
@@ -253,11 +279,35 @@ func (f *forwarder) remoteConnection() {
 		}
 	}
 
+	// Agent Forwarding
+	select {
+	case _ = <-f.chanAgentForwarding:
+		agentChan, agentReqs, err := f.InitialClientSshCon.OpenChannel("auth-agent@openssh.com", nil)
+		if err == nil {
+			defer agentChan.Close()
+			go ssh.DiscardRequests(agentReqs)
+
+			// Set up the client
+			ag := agent.NewClient(agentChan)
+
+			// Make sure PK is first in the list if supported.
+			clientConfig.Auth = append([]ssh.AuthMethod{ssh.PublicKeysCallback(ag.Signers)}, clientConfig.Auth...)
+		} else {
+			debug(fmt.Sprintf("=======> %s", err))
+			fmt.Fprintf(f.clientChannel, "AgentForwarding have to be enable ! Closing connection. (%s)\r\n", remoteAddr, err)
+			f.clientSshConn.Close()
+		}
+	case <-time.After(2 * time.Second):
+		log1("Unable to get agent forwarding request after 2 seconds ... abord connection")
+		fmt.Fprintf(f.clientChannel, "AgentForwarding have to be enable ! Closing connection.\r\n")
+		f.clientSshConn.Close()
+	}
+
 	debug(fmt.Sprintf("%s Connecting to remote desination ... %s", f.ConnID, remoteAddr))
 	f.remoteSshConn, err = ssh.Dial("tcp", remoteAddr, clientConfig)
 	if err != nil {
 		debug(fmt.Sprintf("%s Connection failed to remote host %s : %s", f.ConnID, remoteAddr, err))
-		fmt.Fprintf(f.clientChannel, "Connection failed to remote host: %s - %s\n", remoteAddr, err)
+		fmt.Fprintf(f.clientChannel, "Connection failed to remote host: %s \r\n\t => %s\r\n", remoteAddr, err)
 		f.clientSshConn.Close()
 		return
 	}
@@ -265,7 +315,6 @@ func (f *forwarder) remoteConnection() {
 	debug(fmt.Sprintf("%s Dialled remote destination successfully ...", f.ConnID))
 
 	// Forward the session channel
-	//log.Printf("Setting up channel to remote %s", remoteAddr)
 	f.remoteChannel, f.remoteRequests, err = f.remoteSshConn.OpenChannel("session", []byte{})
 	if err != nil {
 		debug(fmt.Sprintf("%s Remote session setup failed: %v", f.ConnID, err))
@@ -282,18 +331,23 @@ func (f *forwarder) remoteConnection() {
 		return
 	}
 
+	fmt.Fprintf(f.clientChannel, "Connection to remote host established. Enjoy !\r\n\n")
+
 	// launch proxy service
 	f.proxy()
 }
 
 func (f *forwarder) proxy() {
 
-	debug(fmt.Sprintf("%s Entering proxy() ...", f.ConnID))
+	debug(fmt.Sprintf("%s Entering mode proxy ...", f.ConnID))
 
+	// close channels and connections
 	var closer sync.Once
 	closeFunc := func() {
 		f.clientChannel.Close()
 		f.remoteChannel.Close()
+		f.clientSshConn.Close()
+		f.remoteSshConn.Close()
 	}
 
 	defer closer.Do(closeFunc)
@@ -302,13 +356,13 @@ func (f *forwarder) proxy() {
 	// From remote, to client.
 	go func() {
 		io.Copy(f.clientChannel, f.remoteChannel)
-		closerChan <- true
+		closerChan <- true // handle end of connection
 	}()
 
 	// from client to remote
 	go func() {
 		io.Copy(f.remoteChannel, f.clientChannel)
-		closerChan <- true
+		closerChan <- true // handle end of connection
 	}()
 
 	for {
@@ -367,6 +421,6 @@ func (f *forwarder) getPrincipal(principal string, principals string) string {
 			return c[1]
 		}
 	}
-	fail(fmt.Sprintf("%s Unable to \"%s\" in principals %s", f.ConnID, principal, principals))
+	log1(fmt.Sprintf("%s Unable to \"%s\" in principals %s", f.ConnID, principal, principals))
 	return ""
 }

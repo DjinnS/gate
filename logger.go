@@ -15,7 +15,7 @@ import (
 type LogChannel struct {
 	StartTime     time.Time
 	UserName      string
-	Destination string
+	Destination   string
 	ActualChannel ssh.Channel
 	LogDir        string
 	fd            *os.File
@@ -41,7 +41,7 @@ func NewLogChannel(startTime time.Time, channel ssh.Channel, username string, de
 	return &LogChannel{
 		StartTime:     startTime,
 		UserName:      username,
-		Destination: destination,
+		Destination:   destination,
 		ActualChannel: channel,
 		LogDir:        logDir,
 		initialBuffer: bytes.NewBuffer([]byte{}),
