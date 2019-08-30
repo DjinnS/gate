@@ -128,6 +128,7 @@ func handleDirect(client *sshClient, newChannel ssh.NewChannel) {
 	// Forward is a service that open a remote ssh connection to the given target
 	// Target is get from the payload (ProxyCommand or ProxyJump parameters)
 	sshForward := forwarder{}
+	sshForward.InitialClientSshCon = client.SshConn
 	sshForward.ConnID = client.Name
 	sshForward.Principals = client.Principals
 	sshForward.Gate = myGateway
@@ -138,7 +139,6 @@ func handleDirect(client *sshClient, newChannel ssh.NewChannel) {
 	// create a channel to receive the local port to use
 	// we use listen("tcp",":0") to get the next available port
 	sshForward.chanListenPort = make(chan int, 1)
-	//defer sshForward.Close()
 
 	// launch a routine in background to handle forwarding
 	go sshForward.Forward()
